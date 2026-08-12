@@ -1,6 +1,6 @@
-	# Alert Reference Guide — Disk Health & Print Spooler Monitoring
+# Alert Reference Guide — Disk Health & Print Spooler Monitoring
 
-**Last updated:** August 8, 2026
+**Last updated:** August 12, 2026
 **Companion scripts:** `AutoDiskRepair.ps1` (disk repair), `SpoolerRepair.ps1` (print spooler repair)
 
 This guide explains every alert code our RMM monitoring can produce, what each one means in plain English, and what (if anything) you need to do about it. When an alert comes in, find its code in the **60-Second Triage Table** below, then jump to the detailed section if you need more background.
@@ -107,6 +107,8 @@ When the alert fires, `AutoDiskRepair.ps1` runs on the machine. In plain English
 3. **Repairs Windows' own system files** (the DISM and SFC tools — think of these as restoring Windows' factory-original files from a known-good source).
 4. **If corruption was found:** schedules the deep repair (**chkdsk**) to run at the next reboot — Windows can't deeply repair the drive it's actively running from, the same way you can't rebuild a road while driving on it. It also plants a one-time task that re-checks the disk after that reboot and reports the final result.
 
+**Burst protection (added Aug 12, 2026):** a single disk hiccup often writes many events in the *same second*, and the RMM raises one alert — and launches one copy of the script — per matching event (observed: 10 launches in one second). The RMM's event monitors offer no de-duplication setting, so the script guards itself: if another copy is already running, or a run completed within the last 60 minutes, the duplicate exits immediately (exit code 0, no events written, disk untouched). **A stack of same-second "Hard Disk Repair" entries in a device's activity feed during a burst is therefore expected** — only one of them does any work.
+
 Its report codes (Application log, source `AutoDiskRepair`):
 
 - **9000 — Volume verified clean.** 🟢 The all-clear. Either nothing was actually wrong, or the repair worked and a fresh scan confirmed the disk is healthy. **This code automatically closes the disk alert** — if you never saw the alert, this is why. No action.
@@ -165,6 +167,8 @@ Everything needed to rebuild or audit the monitors. All event monitors use event
 | Auto-resolution | `AutoDiskRepair` code 9000, Information, 1 in 60 min | same | same |
 
 Optional third monitor if desired: `System` / `disk` / code **52** alone at **1 time in 60 min** — a SMART death notice should never wait for a second event. (With the 2-in-60 threshold on Trigger A, a lone 52 waits for company; in practice dying drives are chatty, but the dedicated monitor removes the gamble.)
+
+Burst behavior: these monitors raise **one alert per matching event** with no de-duplication option, so an event burst launches many simultaneous copies of the response script. The de-duplication lives in `AutoDiskRepair.ps1` itself (single-instance mutex + 60-minute cooldown; duplicates exit 0 without writing events). If the script is ever rebuilt, that guard must be kept.
 
 ### Print spooler system
 
