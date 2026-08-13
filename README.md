@@ -1,214 +1,1676 @@
-# Alert Reference Guide — Disk Health & Print Spooler Monitoring
+# WiTechTools
 
-**Last updated:** August 12, 2026
-**Companion scripts:** `AutoDiskRepair.ps1` (disk repair), `SpoolerRepair.ps1` (print spooler repair)
+> **PowerShell 7 helpdesk and security toolkit for WiTech technicians.**
+> Version 4.4.0 · 68 commands · 60 shortcuts
 
-This guide explains every alert code our RMM monitoring can produce, what each one means in plain English, and what (if anything) you need to do about it. When an alert comes in, find its code in the **60-Second Triage Table** below, then jump to the detailed section if you need more background.
+Every command prints a colour-coded table in your terminal, so you can read the answer at a glance instead of squinting at raw output. Most commands are read-only and safe to run on a user's machine while they watch.
 
----
+**New here?** Read [Getting Started](#getting-started), then [Common Scenarios](#common-scenarios). You do not need to memorise 68 commands — you need to know which four to reach for when someone says "the internet is slow".
 
-## 1. How the System Works (Plain English)
-
-Windows keeps a running diary of everything that happens on a computer, called the **event log**. When something goes wrong — a hard drive stumbles, a service crashes — Windows writes a numbered note in that diary. Our RMM monitors read the diary constantly and raise an alert when certain bad numbers appear.
-
-Here's the part that makes our setup different from plain alerting: **the alerts trigger robots that try to fix the problem first.** The flow looks like this:
-
-```
-Windows logs a problem code
-        │
-        ▼
-RMM monitor sees it → raises an alert → runs the repair script
-        │
-        ▼
-The repair script does its work, then writes ITS OWN code back
-into the event log saying how it went:
-        │
-        ├── "All fixed" code  → the alert closes itself. Nobody is bothered.
-        ├── "In progress" code → alert stays open until the fix completes.
-        └── "I give up" code  → a SECOND monitor sees this and raises a
-                                HIGH-priority alert: a human is needed.
-```
-
-So there are **two families of codes** you'll see in alerts:
-
-1. **Windows' own warning codes** (7, 11, 51, 52, 55, 153, etc.) — Windows saying "something looks wrong." These start the process.
-2. **Our robots' report codes** (8000-series for printing, 9000-series for disks) — our scripts saying "here's what I found and what I did." These end the process, one way or the other.
-
-**The rule of thumb:** if the only codes you see are green ones from the tables below, the system handled it. The codes that page you at High priority (9002, 9003, 8002) exist precisely because the robot already tried everything safe and failed — don't re-run the automation on those; a person needs to look.
+**Been here a while?** Jump to the [Quick Reference](#quick-reference) or the [Command Reference](#command-reference).
 
 ---
 
-## 2. 60-Second Triage Table
+## Contents
 
-Every code in the system, one line each. 🟢 = no action needed, 🟡 = keep an eye on it / minor action, 🔴 = act now.
-
-| Code | Who logs it | One-line meaning | Severity | What you do |
-|---|---|---|---|---|
-| **7** | Windows (`disk`) | Drive found a physically damaged spot (bad block) | 🟡 | Auto-repair runs. Watch for repeats — repeats mean the drive is wearing out. |
-| **11** | Windows (`disk`) | Controller error — drive, cable, or controller misbehaving | 🟡 | Auto-repair runs. If it repeats, check/replace the SATA cable first, then suspect the drive. |
-| **51** | Windows (`disk`) | Error while swapping memory to/from disk (paging) | 🟡 | Auto-repair runs. Occasional ones are harmless; a flood means drive trouble. |
-| **52** | Windows (`disk`) | **The drive itself predicts it will fail (SMART warning)** | 🔴 | Back up the machine and replace the drive. This is the drive's own death announcement — believe it. |
-| **153** | Windows (`disk`) | A disk operation had to be retried | 🟡 | Auto-repair runs. Occasional = busy disk. Frequent = failing drive, cable, or overloaded VM host. |
-| **50** | Windows (`Ntfs`) | Windows couldn't save data it promised to write — **data was lost** | 🟡 | Auto-repair runs. Note which machine; repeats alongside `disk` codes = dying drive. |
-| **55** | Windows (`Ntfs`) | File system structure is corrupted — the classic "disk corruption" event | 🟡 | Auto-repair runs (this is the main code the whole disk system was built for). |
-| **57** | Windows (`Ntfs`) | Failed to flush data to the transaction log | 🟡 | Auto-repair runs. Same watch-for-repeats rule as 50. |
-| **98** | Windows (`Ntfs`) | Volume health report — the Error/Warning version means the volume needs attention | 🟡 | Auto-repair runs. (The harmless "volume is healthy" version is filtered out by our monitor settings.) |
-| **9000** | Our robot (`AutoDiskRepair`) | ✅ Disk verified clean — repair succeeded or nothing was wrong | 🟢 | Nothing. This code closes the disk alert automatically. |
-| **9001** | Our robot (`AutoDiskRepair`) | Repair scheduled — machine must REBOOT for the deep repair to run | 🟡 | Reboot the machine (or let the maintenance window do it). Alert stays open until the post-reboot check passes. |
-| **9002** | Our robot (`AutoDiskRepair`) | 🚨 **Drive hardware is failing. Robot refused to continue.** | 🔴 | Back up / image the machine NOW, replace the drive. Do not keep running repairs on it. |
-| **9003** | Our robot (`AutoDiskRepair`) | Deep repair ran at reboot but the disk is STILL corrupted | 🔴 | Back up, then investigate by hand. Usually means hardware is failing in a way SMART hasn't flagged yet. |
-| **8000** | Our robot (`SpoolerRepair`) | ✅ Print spooler restarted and verified working | 🟢 | Nothing. This code closes the spooler alert automatically. |
-| **8001** | Our robot (`SpoolerRepair`) | Print queue was wiped to fix the spooler — queued jobs were deleted | 🟡 | Users may need to reprint. If one machine gets this repeatedly, hunt for the bad printer/driver (see §5). |
-| **8002** | Our robot (`SpoolerRepair`) | 🚨 **Spooler keeps crashing even with a clean queue. Left stopped.** | 🔴 | Almost always a faulty printer driver. See the troubleshooting steps in §5. |
-| **8003** | Our robot (`SpoolerRepair`) | Spooler is disabled ON PURPOSE on this machine (security hardening) | 🟡 | The machine is fine. Fix the monitoring: unassign the spooler monitor from this device. |
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Getting Started](#getting-started)
+- [How to Read This Guide](#how-to-read-this-guide)
+- [Quick Reference](#quick-reference)
+- [Common Scenarios](#common-scenarios)
+- [Command Reference](#command-reference)
+  - [Network & Connectivity](#network--connectivity)
+  - [Network Diagnostics](#network-diagnostics)
+  - [System Health & Performance](#system-health--performance)
+  - [Security & Threat Hunting](#security--threat-hunting)
+  - [Reporting & Documentation](#reporting--documentation)
+  - [Active Directory](#active-directory)
+  - [Files, Media & Module Admin](#files-media--module-admin)
+- [Logging](#logging)
+- [Troubleshooting](#troubleshooting)
+- [Known Issues](#known-issues)
+- [Running the Tests](#running-the-tests)
+- [Project Layout](#project-layout)
 
 ---
 
-## 3. Disk Monitoring — The Windows Warning Codes
+## Requirements
 
-These are the codes **Windows itself** writes when a drive is struggling. They all live in the **System** event log. Any of them (two within an hour, per our threshold) triggers the alert that runs `AutoDiskRepair.ps1`.
-
-A useful mental model: a hard drive failing is like a road wearing out. First you get the occasional pothole (7), then drivers start swerving and retrying (153, 51), then the road crew starts losing cargo (50, 57), then the map itself no longer matches the road (55, 98). And sometimes the road inspector simply condemns it in advance (52).
-
-### Source: `disk` — the hardware layer
-
-These come from the low-level driver that talks to the physical drive. They're about the *hardware*.
-
-- **Event 7 — Bad block.** *"The device has a bad block."* The drive tried to read or write a physical spot on the disk and found it damaged. Drives can quietly remap a few bad blocks around — that's normal aging — but every one Windows actually *reports* means the drive stumbled in a way software noticed. One or two per year: fine. Several per month: the drive is dying; plan a replacement even if the repair script keeps reporting success.
-
-- **Event 11 — Controller error.** *"The driver detected a controller error."* The conversation between Windows and the drive broke down. Three usual suspects, cheapest first: a loose or failing **SATA/power cable**, the disk **controller** on the motherboard, or the **drive** itself. If a machine logs these repeatedly, reseat/replace the cable before condemning the drive — it's a $5 fix that solves a surprising number of these.
-
-- **Event 51 — Paging error.** Windows constantly moves data between RAM and disk (called *paging*). This code means one of those transfers hit an error. It's the noisiest code we monitor — busy disks, sleep/resume cycles, and USB drives all cause occasional harmless ones, which is why our threshold requires two events within an hour before alerting. A steady stream of 51s, especially with 7s or 153s alongside, is a failing drive.
-
-- **Event 52 — SMART predicted failure. THE BIG ONE.** 🔴 Every modern drive runs a built-in self-test system called **SMART** (Self-Monitoring, Analysis and Reporting Technology). Event 52 means the drive's own self-test concluded: *"I am going to fail. Back up your data immediately."* Drives don't say this lightly — treat it as a formal death notice. Sometimes you get weeks of warning, sometimes days. **Do not wait, do not run repairs** — back up or image the machine and replace the drive. (The repair script protects you here: it checks drive health before doing anything and will refuse to run repairs on a drive in this state, raising code 9002 instead.)
-
-- **Event 153 — IO operation retried.** A read or write didn't complete on the first try and had to be re-issued. Think of it as the drive saying "sorry, what?" — once in a while is nothing (especially on virtual machines or busy servers, where storage latency causes this), but frequent retries are the classic early sign of a drive, cable, or controller on the way out.
-
-### Source: `Ntfs` — the filing-system layer
-
-**NTFS** is the filing system Windows uses to organize data on the drive — the index cards that record which file lives where. These codes mean the *organization* of the data is damaged, which is usually (but not always) caused by the hardware problems above, a power loss mid-write, or a crash.
-
-- **Event 50 — Delayed write failed, data lost.** Windows holds data in memory briefly before writing it to disk (it's faster). This code means that write failed and **the data in question is gone**. A user's document may be damaged. Occasional occurrences happen with removable drives; on an internal drive, repeats mean real trouble.
-
-- **Event 55 — File system corruption detected.** The flagship corruption event, and the original reason this whole monitoring system exists. NTFS found that its own records are damaged — the index cards no longer match reality. This is exactly what the repair script's chkdsk step fixes. One event 55, repaired, verified clean (9000), never seen again: fine. Recurring 55s on the same machine: the corruption has a cause, and it's almost always failing hardware — check what `disk`-source codes that machine has been logging.
-
-- **Event 57 — Failed to flush transaction log.** NTFS keeps a journal of changes so it can recover cleanly from crashes. This code means it couldn't save that journal to disk. Same family and same response as 50.
-
-- **Event 98 — Volume health report.** NTFS periodically reports the health of each volume. The **Error/Warning** versions say the volume needs repair. There is also a completely harmless **Information** version ("Volume C: is healthy. No action is needed.") that Windows logs routinely at startup — our monitors are configured to ignore Information-level events specifically so that friendly version can't raise false alarms. If you ever rebuild these monitors, keeping that type filter is essential.
-
----
-
-## 4. Disk Monitoring — The Robot's Report Codes (9000-series)
-
-When the alert fires, `AutoDiskRepair.ps1` runs on the machine. In plain English, it:
-
-1. **Asks the drive if it's dying** (SMART health check). If yes → stops immediately and reports 9002. Running heavy repairs on a dying drive can finish it off, so the robot refuses.
-2. **Scans the file system online** (no downtime, users unaffected).
-3. **Repairs Windows' own system files** (the DISM and SFC tools — think of these as restoring Windows' factory-original files from a known-good source).
-4. **If corruption was found:** schedules the deep repair (**chkdsk**) to run at the next reboot — Windows can't deeply repair the drive it's actively running from, the same way you can't rebuild a road while driving on it. It also plants a one-time task that re-checks the disk after that reboot and reports the final result.
-
-**Burst protection (added Aug 12, 2026):** a single disk hiccup often writes many events in the *same second*, and the RMM raises one alert — and launches one copy of the script — per matching event (observed: 10 launches in one second). The RMM's event monitors offer no de-duplication setting, so the script guards itself: if another copy is already running, or a run completed within the last 60 minutes, the duplicate exits immediately (exit code 0, no events written, disk untouched). **A stack of same-second "Hard Disk Repair" entries in a device's activity feed during a burst is therefore expected** — only one of them does any work.
-
-Its report codes (Application log, source `AutoDiskRepair`):
-
-- **9000 — Volume verified clean.** 🟢 The all-clear. Either nothing was actually wrong, or the repair worked and a fresh scan confirmed the disk is healthy. **This code automatically closes the disk alert** — if you never saw the alert, this is why. No action.
-
-- **9001 — Repair scheduled, reboot required.** 🟡 Corruption was found and the deep repair is queued for the next restart. **The fix has NOT happened yet.** Action: restart the machine (after hours is fine — coordinate with the user). Two things to know: the reboot will take noticeably longer than normal because the repair runs during startup — on a large traditional hard drive it can run **for hours** and the machine may look stuck. It isn't. Warn the user, don't power-cycle it. After the reboot, the robot re-checks the disk and reports either 9000 (fixed — alert closes) or 9003 (still broken — see below).
-
-- **9002 — Drive hardware failing, robot stood down.** 🔴 The SMART health check failed. The robot deliberately did *not* attempt repairs because stressing a dying drive accelerates the failure. **Action: treat as urgent.** Back up or image the machine immediately, replace the drive, restore. Every day of delay is a gamble on the drive's remaining life. This code raises its own High-priority alert and never closes automatically — that's intentional.
-
-- **9003 — Still corrupted after the deep repair.** 🔴 The chkdsk ran at reboot, and the follow-up scan *still* found corruption. When repairs don't hold, the corruption has an active cause — usually hardware failing in a way SMART hasn't flagged yet, occasionally a bad RAM stick corrupting data on its way to disk. **Action:** back up the machine first (protect the data before experimenting), then investigate: run a manual `chkdsk` and read its output, check the machine's recent `disk`-source events, consider a RAM test, and lean toward drive replacement if anything else supports it.
-
-**Script exit codes** (shown in the RMM's script-run history, not in alerts): `0` = clean/fixed, `1` = repair scheduled awaiting reboot, `2` = failing hardware (matches 9002), `3` = the script itself hit an error (check the script output).
-
----
-
-## 5. Print Spooler Monitoring
-
-The **print spooler** is the Windows service that manages all printing — when it stops, nobody on that machine can print. This monitor isn't watching event codes; it watches the **service itself**, and alerts when the spooler has been down for 5+ minutes. The alert runs `SpoolerRepair.ps1`, which works in escalating tiers:
-
-1. **First failure:** restart the service and verify it stays up.
-2. **Second failure within 30 minutes:** a plain restart didn't hold, which almost always means a **corrupted print job** is stuck in the queue and crashes the spooler every time it starts (a "poisoned" job). The robot wipes the print queue, then restarts.
-3. **Third failure within 30 minutes:** even a clean queue didn't help. The robot **stops trying and leaves the service stopped** so the alert stays open — at this point it's a defective printer driver, and endless auto-restarts would just hide the problem.
-
-Its report codes (Application log, source `SpoolerRepair`):
-
-- **8000 — Spooler restarted and verified.** 🟢 Fixed. Closes the alert automatically. No action.
-
-- **8001 — Print queue was purged.** 🟡 The robot deleted everything waiting in the print queue to recover the spooler. It worked — but **users' pending print jobs were deleted** and they'll need to reprint. No ticket needed for a one-off. **The pattern to watch:** the same machine logging 8001 weekly means some specific printer, driver, or document type keeps generating poison jobs — find it (ask the user what they printed just before each incident) and fix the driver rather than letting the robot keep mopping up.
-
-- **8002 — Spooler crash-looping, left stopped.** 🔴 Restarts failed, a clean queue failed; a human is needed and **printing on this machine is down until you act.** This is a faulty-driver problem in nearly every case. Troubleshooting order:
-  1. Open Event Viewer → Windows Logs → Application, and look for **"Application Error" events naming `spoolsv.exe`** — the "faulting module" line usually names the DLL of the guilty driver.
-  2. Ask what changed: a newly added printer, a driver update, a new label/receipt printer are the usual suspects.
-  3. Remove or roll back that driver (Print Management console → All Drivers), then start the spooler manually.
-  4. If it holds, done — the next successful robot run reports 8000 and closes the escalation alert.
-
-- **8003 — Spooler is disabled on purpose.** 🟡 Some machines (domain controllers, most servers) have the spooler **deliberately disabled** as a security measure (the "PrintNightmare" vulnerability made this standard practice). The robot detected that this machine is one of them and correctly refused to fight the policy. **The machine is fine — the monitoring is wrong.** Action: unassign the spooler monitor from this device so it stops alerting.
-
-**Script exit codes:** `0` = spooler running, `1` = crash-loop, human needed (matches 8002), `2` = disabled by policy (matches 8003), `3` = script error.
-
----
-
-## 6. Monitor Configuration Reference
-
-Everything needed to rebuild or audit the monitors. All event monitors use event types **Critical + Error + Warning only** (never Information — see Event 98 above for why), except the auto-resolution rules, which specifically match Information.
-
-### Disk system
-
-| Setting | Trigger A (hardware) | Trigger B (file system) | Escalation ("needs a human") |
-|---|---|---|---|
-| Event Log Name | `System` | `System` | `Application` |
-| Event Source Name | `disk` | `Ntfs` | `AutoDiskRepair` |
-| Event codes | 7, 11, 51, 52, 153 | 50, 55, 57, 98 | 9002, 9003 |
-| Event types | Critical, Error, Warning | Critical, Error, Warning | Error |
-| Threshold | 2 times in 60 min | 2 times in 60 min | 1 time in 60 min |
-| Priority | Moderate | Moderate | **High** |
-| Response | `AutoDiskRepair.ps1` (timeout ≥ 90 min) | `AutoDiskRepair.ps1` (timeout ≥ 90 min) | none |
-| Auto-resolution | `AutoDiskRepair` code 9000, Information, 1 in 60 min | same | same |
-
-Optional third monitor if desired: `System` / `disk` / code **52** alone at **1 time in 60 min** — a SMART death notice should never wait for a second event. (With the 2-in-60 threshold on Trigger A, a lone 52 waits for company; in practice dying drives are chatty, but the dedicated monitor removes the gamble.)
-
-Burst behavior: these monitors raise **one alert per matching event** with no de-duplication option, so an event burst launches many simultaneous copies of the response script. The de-duplication lives in `AutoDiskRepair.ps1` itself (single-instance mutex + 60-minute cooldown; duplicates exit 0 without writing events). If the script is ever rebuilt, that guard must be kept.
-
-### Print spooler system
-
-| Setting | Service monitor | Escalation ("needs a human") |
-|---|---|---|
-| Watches | Service `Spooler` — *is Not Running* (or *is Stopped*) for 5 min | Event log |
-| Event Log / Source | — | `Application` / `SpoolerRepair` |
-| Event codes | — | 8002, 8003 |
-| Event types | — | Error, Warning |
-| After boot delay | 15 minutes | — |
-| Priority | Moderate | **High** |
-| Auto resolve | After 1 minute (no longer applicable) | `SpoolerRepair` code 8000, Information, 1 in 60 min |
-| Response | `SpoolerRepair.ps1` (timeout 5 min) | none |
-| Targets | Workstations & print servers only — never DCs or spooler-disabled servers | same devices |
-
----
-
-## 7. Codes We Deliberately Left Out (and why)
-
-The original disk monitor watched codes **55 98 153 7 51 9 33 57**. Two were dropped on purpose — if you're ever tempted to re-add them, here's the history:
-
-- **Event 9** (controller timeout) — a real signal, but it's logged by whatever storage *driver* each machine uses (`storahci`, `iaStorA`, `stornvme`, RAID vendors…), so no single source-filtered monitor can catch it, and unfiltered it collides with unrelated components that also use ID 9. Timeouts severe enough to matter cascade into codes 153/7, which Trigger A catches anyway. Re-add it only as its own monitor scoped to a specific driver source if the fleet standardizes on one.
-- **Event 33** — with no source filter this matched unrelated housekeeping events (shadow-copy cleanup and others) and was likely a meaningful chunk of the old monitor's false alarms. There is no well-known disk-health event at ID 33.
-- **Event 137** (`Ntfs` transaction errors) — genuine but notoriously noisy on machines running backup software (it often fires during routine snapshot operations). Left out unless evidence shows it appearing alongside `disk`-source codes.
-- **Event 157** (`disk` — surprise removal) — legitimate for flaky cables/enclosures, but it also fires every time someone yanks a USB drive without ejecting. Add to Trigger A only if the fleet has few removable drives.
-
----
-
-## 8. Glossary
-
-| Term | Plain-English meaning |
+| Requirement | Detail |
 |---|---|
-| **Event log** | Windows' built-in diary of everything that happens. Viewable with the Event Viewer app. |
-| **Event source** | Which component wrote a diary entry (e.g., `disk` = the disk driver, `Ntfs` = the filing system, `AutoDiskRepair` = our robot). |
-| **Event code / ID** | The number identifying what kind of entry it is. Codes are only meaningful *together with* their source — different sources reuse the same numbers. |
-| **SMART** | Every drive's built-in self-test. When SMART predicts failure, the drive is formally telling you it's dying. |
-| **NTFS** | The filing system Windows uses to track which file lives where on the drive. "Corruption" usually means this index is damaged, not the files themselves. |
-| **chkdsk** | Windows' disk repair tool ("check disk"). Deep repairs must run during startup, before Windows is fully awake — which is why some fixes require a reboot. |
-| **DISM / SFC** | Tools that verify and restore Windows' own system files from known-good copies. |
-| **Print spooler** | The Windows service that manages the printing queue. Spooler down = no printing on that machine. |
-| **Poisoned print job** | A corrupt document in the queue that crashes the spooler every time it starts. Cured by wiping the queue. |
-| **Auto-resolution** | The RMM rule that closes an alert automatically when the "all clear" code (9000 / 8000) appears. |
-| **Escalation monitor** | The second monitor watching for the robots' "I give up" codes (9002, 9003, 8002) — the ones that mean a human must step in. |
+| **PowerShell** | **7.0 or newer.** This is not the blue "Windows PowerShell" 5.1 that ships with Windows — it is a separate install. Run `pwsh` to launch it. The module will refuse to load on 5.1. |
+| **Operating system** | Windows 10 or Windows 11 |
+| **Permissions** | Most commands run as a standard user. Some need an elevated terminal — see [How to Read This Guide](#how-to-read-this-guide). |
+
+### Optional extras
+
+These are only needed for specific commands. Everything else works without them.
+
+| Extra | Needed by | Notes |
+|---|---|---|
+| **FFmpeg** on `PATH` | `Set-ImageToPng`, `Set-ImageToJpg` | Image and video conversion |
+| **`VIRUSTOTAL_API_KEY`** environment variable | `Get-MalwareInfo` | Or pass `-ApiKey` directly |
+| **RSAT Active Directory tools** | `Get-ADUserInfo`, `Unlock-ADUser` | Only on domain-joined machines |
+| **Internet access** | `Get-IPInfo`, `Invoke-SpeedTest`, `Invoke-FallbackSpeedTest`, `Get-Download`, `Get-MalwareInfo`, `Get-Network` (vendor lookup only) | |
+| **WinRM enabled on the target** | Any command used with `-ComputerName` pointing at another machine | |
+
+---
+
+## Installation
+
+1. **Copy the module folder** to your PowerShell 7 modules directory:
+
+   ```
+   C:\Users\<YourName>\Documents\PowerShell\Modules\WiTechTools\
+   ```
+
+   > If your Documents folder is redirected to OneDrive, use the OneDrive path — that is the real Documents folder. To find it, run:
+   > ```powershell
+   > [Environment]::GetFolderPath('MyDocuments')
+   > ```
+
+2. **Check the folder contains** these items:
+
+   ```
+   WiTechTools.psd1
+   WiTechTools.psm1
+   PSScriptAnalyzerSettings.psd1
+   Public\
+   ```
+
+3. **Import it:**
+
+   ```powershell
+   Import-Module WiTechTools
+   ```
+
+4. **Make it load automatically** in every new terminal by adding that line to your profile:
+
+   ```powershell
+   Add-Content $PROFILE 'Import-Module WiTechTools'
+   ```
+
+On first import, the module registers a **WiTech** source in the Windows Application event log. If you are not running as administrator the first time, that registration is skipped with a warning — the module still works, it just cannot write to the event log until it is registered once from an elevated terminal.
+
+---
+
+## Getting Started
+
+Verify the install:
+
+```powershell
+Get-Module WiTechTools          # should report version 4.4.0
+cmds                            # lists every command and its shortcut
+```
+
+Try three safe, read-only commands:
+
+```powershell
+gip          # your public IP, ISP and location
+gds          # disk space on every drive
+gnet         # everything alive on the local network
+```
+
+Every command has built-in help:
+
+```powershell
+Get-Help Get-Network -Full        # everything
+Get-Help Get-Network -Examples    # just the examples
+```
+
+### If a command is not found
+
+The module is not loaded in that terminal. Run `Import-Module WiTechTools`.
+
+### Reloading after an update
+
+```powershell
+Import-Module WiTechTools -Force
+```
+
+---
+
+## How to Read This Guide
+
+**Shortcuts (aliases).** Nearly every command has a short form. `Get-Network` and `gnet` are the same command — use whichever you prefer. Eleven commands have no shortcut; those are marked `—`.
+
+**The Admin column** tells you whether you need an elevated terminal (right-click PowerShell 7 → *Run as administrator*):
+
+| Marker | Meaning |
+|:---:|---|
+| **Yes** | The command **checks** for admin rights. Without them it prints a clear warning and stops — nothing half-finished. |
+| **Yes\*** | The command **needs** admin rights but does **not** check. Without them, expect confusing errors or silently incomplete results. This marker is our assessment from reading the code, not something the command enforces. |
+| **—** | Runs fine as a standard user. |
+
+**Parameter tables** list every option. Anything marked *required* must be supplied; everything else has a default shown.
+
+**A note on switches.** A parameter marked `switch` is an on/off flag — you write `-PortScan`, not `-PortScan $true`.
+
+**Previewing destructive commands (`-WhatIf` / `-Confirm`).** The six commands that delete files, kill processes, or reset services — `Invoke-DeepDiskCleanup`, `Clear-TempFiles`, `Clear-BrowserCache`, `Invoke-ProcessGuard -AutoKill`, `Reset-NetworkAdapter`, and `Reset-PrintSpooler` — accept two standard safety switches:
+
+- `-WhatIf` lists exactly what the command *would* do and changes nothing. Run it first when you are unsure.
+- `-Confirm` prompts you to approve each action before it happens.
+
+By design they do **not** prompt unless you ask, so existing scripts and the TAYi console keep working unchanged.
+
+```powershell
+Invoke-DeepDiskCleanup -WhatIf     # show what would be deleted, delete nothing
+Clear-TempFiles -Confirm           # ask before clearing each temp folder
+```
+
+---
+
+## Quick Reference
+
+Run `cmds` to print this list in your terminal.
+
+### Network & Connectivity
+
+| Command | Shortcut | Admin | What it does |
+|---|---|:---:|---|
+| `Get-Network` | `gnet` | — | Ping-sweep a subnet and identify what each device is |
+| `Get-Ports` | `port` | — | Check whether specific TCP ports are open on a host |
+| `Get-IPInfo` | `gip` | — | Public IP, ISP, and location |
+| `Clear-DNSCache` | `cdns` | **Yes** | Flush DNS, reset the TCP/IP stack, renew DHCP |
+| `Invoke-WakeOnLan` | `wol` | — | Wake a sleeping machine by MAC address |
+| `Connect-Wifi` | `cwf` | — | Join a Wi-Fi network, creating the profile if needed |
+| `Get-WiFiPassword` | `gwf` | — | Show the saved password for a Wi-Fi network |
+| `Get-WiFiSurvey` | `wifiscan` | — | Survey nearby Wi-Fi: signal, channel, band, security |
+| `Invoke-SpeedTest` | `speed` | — | Internet speed test via Ookla Speedtest CLI |
+| `Invoke-FallbackSpeedTest` | `speed2` | — | Download speed test using Cloudflare, no install needed |
+| `Watch-LiveTraffic` | `traffic` | — | Live view of network connections by process |
+| `Get-Download` | `dl` | — | Download a file with a progress bar |
+
+### Network Diagnostics
+
+| Command | Shortcut | Admin | What it does |
+|---|---|:---:|---|
+| `Invoke-NetworkDiag` | `netdiag` | — | Five-step connectivity check with a score out of 5 |
+| `Invoke-SubnetScan` | `subscan` | — | Fast ping sweep to find live hosts |
+| `Invoke-PortScan` | `pscan` | — | TCP port scan against one host |
+| `Get-AdvancedDNS` | `advdns` | — | Full DNS record lookup against a chosen DNS server |
+| `Get-ActiveConnections` | `netcon` | — | Current established TCP connections |
+| `Get-NetworkInsight` | `netinsight` | — | Adapter details, gateway, DNS, and the ARP table |
+| `Test-EndpointReachability` | `pingreach` | — | Ping a host and report average response time |
+| `Reset-NetworkAdapter` | `netreset` | **Yes** | Disable and re-enable active network adapters |
+
+### System Health & Performance
+
+| Command | Shortcut | Admin | What it does |
+|---|---|:---:|---|
+| `Get-WiTechSystemInfo` | `gci2` | — | Hardware and OS summary |
+| `Get-DiskSpace` | `gds` | — | Free, used, and total space per drive |
+| `Get-DiskHealth` | `diskhealth` | Yes\* | S.M.A.R.T. health of physical disks |
+| `Get-InstalledSoftware` | `software` | — | Installed programs from the registry, with CSV export |
+| `Get-PendingWindowsUpdate` | `winupd` | — | Windows updates waiting to install |
+| `Get-ProcessMemoryConsumer` | `memproc` | — | Top memory-hungry processes |
+| `Get-ServiceHealth` | `gsvc` | Yes\* | Check critical Windows services, optionally restart them |
+| `Get-PrinterStatus` | `printers` | Yes\* | List printers and queue depth, optionally clear stuck jobs |
+| `Get-StaleProfiles` | — | — | Find user profiles nobody has touched in N days |
+| `Clear-BrowserCache` | `clearcache` | Yes\* | Clear Chrome, Edge, and/or Firefox cache |
+| `Clear-TempFiles` | `ctmp` | — | Delete temp files |
+| `Invoke-DeepDiskCleanup` | `deepclean` | **Yes** | Aggressive cleanup of system and user caches |
+| `Invoke-SystemRepair` | `repair` | **Yes** | Run SFC and DISM to repair Windows |
+| `Optimize-CPU` | `ocpu` | **Yes** | Switch to High Performance and disable CPU throttling |
+| `Optimize-HDD` | — | **Yes** | Defrag, DISM, SFC, then schedule chkdsk |
+| `Reset-PrintSpooler` | `rps` | **Yes** | Stop the spooler, clear the queue, restart it |
+| `Invoke-GPUpdate` | `gpo` | Yes\* | Force a Group Policy refresh, locally or remotely |
+| `Repair-IdentityTrust` | — | Yes\* | Check and repair the domain trust relationship |
+
+### Security & Threat Hunting
+
+| Command | Shortcut | Admin | What it does |
+|---|---|:---:|---|
+| `Get-MalwareInfo` | `gmi` | — | Check file hashes against VirusTotal |
+| `Get-FailedLogins` | `gfl` | **Yes** | Failed logon attempts, grouped by user and source |
+| `Get-USBHistory` | `usblog` | **Yes** | Every USB device ever plugged into this machine |
+| `Get-LocalAdminAudit` | `ladmin` | — | Who is a local administrator, and who should not be |
+| `Invoke-ProcessGuard` | `pwatch` | Yes\* | Watch for CPU/RAM hogs, optionally kill them |
+| `Invoke-RansomwareHeuristics` | — | Yes\* | Look for ransomware indicators |
+| `Get-LateralMovementHeuristics` | — | **Yes** | Security log patterns suggesting lateral movement |
+| `Get-DefenderStatus` | `defender` | — | Microsoft Defender health and recent detections |
+| `Get-PersistenceAudit` | `persist` | Yes\* | Autoruns/tasks/services — flags unsigned entries |
+| `Get-FirewallAudit` | `fwaudit` | — | Firewall profile state and risky inbound rules |
+
+### Reporting & Documentation
+
+| Command | Shortcut | Admin | What it does |
+|---|---|:---:|---|
+| `Get-TicketContext` | `ticket` | — | One-shot summary for a support call |
+| `Get-Events` | `ge` | — | Recent WiTechTools activity from the event log |
+| `Get-AssetInventory` | `asset` | — | Full hardware, OS, software and network inventory to CSV |
+| `New-IncidentReport` | `incident` | — | Timestamped HTML incident report |
+| `Export-SystemSnapshot` | `snap` | — | Save system state as JSON, or compare against an earlier one |
+| `Invoke-SystemStateDiff` | — | — | Baseline processes/services/ports and report what changed |
+| `Export-EventLogs` | `elogs` | **Yes** | Export Windows event logs to a dated ZIP |
+| `Invoke-PatchReport` | `patch` | — | Recent Windows updates and whether patching is overdue |
+
+### Active Directory
+
+| Command | Shortcut | Admin | What it does |
+|---|---|:---:|---|
+| `Get-ADUserInfo` | `aduser` | — | Account status, group membership, password expiry |
+| `Unlock-ADUser` | `unlock` | — | Unlock a locked-out account |
+
+### Files, Media & Module Admin
+
+| Command | Shortcut | Admin | What it does |
+|---|---|:---:|---|
+| `Get-Keys` | `gk` `getkeys` | — | Pull product keys from a CSV key store |
+| `Set-Directory` | `sd` `setdir` | — | Create a working folder and move into it |
+| `Set-MapDrive` | — | — | Map a network share to a drive letter |
+| `Set-ScanDocs` | — | Yes\* | Set up a scanner share with a limited local account |
+| `Set-ImageToPng` | `cpng` | — | Convert images and video frames to PNG |
+| `Set-ImageToJpg` | `cjpg` | — | Convert images and video frames to JPG |
+| `Sync-Module` | `sync` | — | Mirror this module to the team network share |
+| `Import-WitechModule` | — | — | Reload the module from disk |
+| `Update-WiTechModuleSignature` | — | Yes\* | Code-sign the module (see [Known Issues](#known-issues)) |
+| `Get-WiTechCommands` | `cmds` | — | List every command and shortcut |
+
+---
+
+## Common Scenarios
+
+Real tickets, and the commands that answer them fastest. Run them in order — each one narrows the problem down.
+
+### "The internet is slow"
+
+```powershell
+speed                  # 1. Is it actually slow? Get a number.
+netdiag                # 2. Where does it break? Gateway, DNS, or beyond.
+traffic -GroupBy       # 3. Which program is eating the bandwidth?
+gnet                   # 4. Is something unexpected on the network?
+```
+
+If `netdiag` scores 5/5 but `speed` is poor, the fault is upstream — the ISP or the office link, not the PC.
+
+### "I can't get on the internet at all"
+
+```powershell
+netdiag                # Pinpoints the first broken step
+gip                    # If this works, you have full internet access
+cdns                   # Fixes most DNS and stale-lease problems (needs admin)
+netreset               # Last resort: bounce the adapters (needs admin)
+```
+
+### "I think this machine has a virus"
+
+```powershell
+pwatch                 # Anything eating CPU or RAM abnormally?
+gfl                    # Failed logon bursts = someone guessing passwords
+usblog -Days 30        # Was something plugged in recently?
+Invoke-RansomwareHeuristics   # Encryption indicators
+ladmin                 # Did someone add themselves as an admin?
+```
+
+> `Invoke-RansomwareHeuristics` reports what it sampled. A clean result means "nothing found in the files I checked" — it is not a guarantee the machine is clean.
+
+### "The printer isn't working"
+
+```powershell
+printers               # Is it there, and how deep is the queue?
+rps                    # Stop, clear the queue, restart the spooler (needs admin)
+printers -ClearStuck   # Remove jobs that refuse to die
+```
+
+### "This computer is really slow"
+
+```powershell
+memproc                # What is using the RAM?
+gds                    # Is the disk nearly full? Under ~10% free causes this.
+diskhealth             # Is the drive failing?
+gsvc                   # Are critical services stopped?
+ctmp                   # Free up space
+```
+
+### "I'm locked out" / account problems
+
+```powershell
+aduser jdoe            # Locked? Password expired? Which groups?
+unlock jdoe            # Unlock and reset the bad-password count
+gfl                    # What caused the lockout in the first place?
+```
+
+A lockout usually means a stale password saved somewhere — a phone, a mapped drive, or a scheduled task.
+
+### Setting up or handing over a machine
+
+```powershell
+asset                  # Record what the machine is, to CSV
+snap                   # Save a known-good baseline
+gsvc                   # Confirm critical services are healthy
+patch                  # Confirm it is up to date
+```
+
+Later, if the machine misbehaves, `Invoke-SystemStateDiff -Compare` shows exactly what changed since that baseline.
+
+### Writing up a ticket
+
+```powershell
+ticket                 # Summary to paste into the ticket
+incident -Title "Machine locks up daily"   # Formal HTML report
+elogs -Days 3          # Attach the raw logs (needs admin)
+```
+
+---
+
+## Command Reference
+
+### Network & Connectivity
+
+---
+
+#### `Get-Network` · `gnet`
+
+Ping-sweeps a subnet, then works out **what each device actually is** — a printer, a router, a Windows PC, an IP camera. It combines the MAC address vendor, the hostname, the TTL, and (optionally) open ports to make the call.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Target` | string | your local /24 | An IP (`192.168.1.50`), or a range (`10.0.0.0/24`). Omit to scan your own network. |
+| `-Timeout` | int | `500` | Milliseconds to wait for each ping reply. Lower is faster but misses slow devices. |
+| `-ThrottleLimit` | int | `50` | How many hosts to ping at once. |
+| `-PortScan` | switch | off | Also scan ports. Slower, but makes device identification much more accurate. |
+| `-Ports` | int[] | 21, 22, 23, 25, 53, 80, 110, 139, 143, 443, 445, 515, 554, 631, 3389, 8080, 8443, 9100 | Which ports to scan when `-PortScan` is used. |
+
+```powershell
+gnet                                    # scan your own network
+Get-Network -Target "10.0.0.0/24" -Timeout 200
+Get-Network -PortScan                   # slower, far better device identification
+```
+
+**Reading the Device Type column.** The colour tells you how much to trust it: **green** means proven (it is the gateway, it is this PC, or a port confirmed it), **yellow** means inferred from the hardware vendor, **grey** means a guess from TTL alone. Vendor names are looked up online once, then cached, so the first scan on a new network is slower.
+
+---
+
+#### `Get-Ports` · `port`
+
+Checks whether specific TCP ports are open on a host. Use it to confirm a service is actually listening.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Hostname` | string | `google.com` | Host or IP to test. |
+| `-Ports` | int[] | 80, 443, 22, 21, 3389, 8080 | Ports to test. |
+
+```powershell
+Get-Ports -Hostname "192.168.1.1"
+Get-Ports -Hostname "localhost" -Ports @(80, 443, 1433, 3306)
+Get-Ports -Hostname "myserver" -Ports 22
+```
+
+---
+
+#### `Get-IPInfo` · `gip`
+
+Shows your **public** IP address, ISP, and rough location, from ipinfo.io. Requires internet access — if it fails, you do not have working internet.
+
+*No parameters.*
+
+```powershell
+gip
+```
+
+---
+
+#### `Clear-DNSCache` · `cdns` · **Admin required (enforced)**
+
+The "turn networking off and on again" command. Flushes DNS, releases and renews DHCP, resets the TCP/IP and Winsock stacks, and clears the ARP cache. Fixes a large share of "this one site won't load" and "I got a bad IP" problems.
+
+*No parameters.*
+
+```powershell
+cdns
+```
+
+> Some resets do not take full effect until the machine restarts.
+
+---
+
+#### `Invoke-WakeOnLan` · `wol`
+
+Sends a Magic Packet to wake a sleeping machine. The target must have Wake-on-LAN enabled in its BIOS and network adapter settings, and you must be on the same network segment.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-MacAddress` | string | *required* | Target MAC. Accepts `AA:BB:CC:DD:EE:FF`, `AA-BB-...`, or `AABBCCDDEEFF`. |
+| `-BroadcastIP` | string | `255.255.255.255` | Set this to your subnet broadcast (e.g. `192.168.1.255`) if the default does not work. |
+| `-Port` | int | `9` | UDP port. Some hardware uses `7`. |
+| `-VerifyIP` | string | none | After sending, ping this IP to confirm the machine woke. |
+| `-VerifyDelay` | int | `30` | Seconds to wait before verifying. |
+
+```powershell
+Invoke-WakeOnLan -MacAddress "AA:BB:CC:DD:EE:FF"
+wol "AABBCCDDEEFF" -VerifyIP "192.168.1.50"
+wol "AA-BB-CC-DD-EE-FF" -BroadcastIP "192.168.1.255" -Port 7
+```
+
+---
+
+#### `Connect-Wifi` · `cwf`
+
+Connects to a Wi-Fi network. If you supply a password it builds a temporary WPA2 profile, connects, then removes the temporary profile file.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-SSID` | string | *required* | Network name. |
+| `-Password` | SecureString | none | Omit if the machine already has a saved profile. |
+| `-InterfaceName` | string | auto-detect | Only needed if the machine has more than one wireless adapter. |
+
+```powershell
+Connect-Wifi -SSID "WiTech-Staff" -Password (Read-Host -AsSecureString "Enter Password")
+cwf -SSID "WiTech-Guest"
+Connect-Wifi -SSID "SecureNet" -Password $mySecurePass -InterfaceName "Wi-Fi 2"
+```
+
+> `-Password` is a **SecureString**, so you cannot paste a plain password directly. Use `(Read-Host -AsSecureString)` as shown — it keeps the password off the screen and out of your command history.
+
+---
+
+#### `Get-WiFiPassword` · `gwf`
+
+Shows the saved password for a Wi-Fi network in plain text. Handy when you need to connect a second device and nobody remembers the key.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-SSID` | string | current network | Which saved network to reveal. |
+
+```powershell
+gwf                                # the network you are on right now
+Get-WiFiPassword -SSID "WiTech-Staff"
+```
+
+> Only works for profiles saved on this machine, and only shows what the machine already knows.
+
+---
+
+#### `Get-WiFiSurvey` · `wifiscan`
+
+Surveys the Wi-Fi around you: signal strength, channel, band, and security type. Use it to find channel congestion or a weak-signal dead spot.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-ShowBSSID` | switch | off | Show each access point's radio MAC — useful for spotting multiple APs on one SSID. |
+| `-Live` | switch | off | Keep refreshing. Walk around to find dead spots. Press `Ctrl+C` to stop. |
+| `-RefreshSecs` | int | `1` | Refresh interval when `-Live` is used. |
+
+```powershell
+wifiscan
+wifiscan -Live -RefreshSecs 2
+Get-WiFiSurvey -ShowBSSID
+```
+
+---
+
+#### `Invoke-SpeedTest` · `speed`
+
+Runs a proper upload and download test using Ookla's Speedtest CLI, downloading the tool automatically on first use. If Ookla is blocked, it falls back to the Cloudflare test.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-OutputFormat` | `Human` `JSON` `CSV` `TSV` | `Human` | `Human` for reading; `JSON` returns an object you can script against. |
+| `-ServerID` | string | auto | Pin the test to a specific Speedtest server. |
+| `-SaveLog` | switch | off | Append the result to a CSV log. |
+| `-LogPath` | string | `%LOCALAPPDATA%\WiTech\SpeedTest_Results.csv` | Where that log goes. |
+| `-ShowNetworkInfo` | switch | off | Also print the local network configuration. |
+| `-ForceRedownload` | switch | off | Re-download the Speedtest CLI. |
+
+```powershell
+speed
+Invoke-SpeedTest -ShowNetworkInfo
+speed -SaveLog -LogPath "C:\WiTechLogs\speed.csv"
+Invoke-SpeedTest -OutputFormat JSON
+```
+
+> Logging with `-SaveLog` over several days is the fastest way to prove an intermittent slowdown to an ISP.
+
+---
+
+#### `Invoke-FallbackSpeedTest` · `speed2`
+
+Download-speed test straight against Cloudflare. No external tool to install, nothing to download first — use it when `speed` is blocked or you want a quick number.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-SaveLog` | switch | off | Append the result to a CSV log. |
+| `-LogPath` | string | `%LOCALAPPDATA%\WiTech\SpeedTest_Results.csv` | Where that log goes. |
+
+```powershell
+speed2
+speed2 -SaveLog -LogPath "C:\Logs\speed_fallback.csv"
+```
+
+> Download only — it does not measure upload.
+
+---
+
+#### `Watch-LiveTraffic` · `traffic`
+
+A live, refreshing table of network connections with the process behind each one. This is how you catch the program quietly saturating the connection.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Top` | int | `28` | Rows to show. |
+| `-RefreshSecs` | int | `3` | Seconds between refreshes. |
+| `-Filter` | `All` `Established` `Listen` `TimeWait` `CloseWait` | `All` | `Established` = active conversations; `Listen` = services waiting for connections. |
+| `-GroupBy` | switch | off | Group by process instead of listing every connection. Best starting view. |
+
+```powershell
+traffic -GroupBy
+Watch-LiveTraffic -Top 20
+traffic -Filter Established -RefreshSecs 1
+```
+
+> Runs until you press `Ctrl+C`.
+
+---
+
+#### `Get-Download` · `dl`
+
+Downloads a file with a live progress bar and speed readout.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Url` | string | *required* | HTTP/HTTPS address. |
+| `-Destination` | string | `%USERPROFILE%\Downloads` | Folder to save into. |
+| `-FileName` | string | from the URL | Save under a different name. |
+| `-Force` | switch | off | Overwrite an existing file. |
+
+```powershell
+Get-Download -Url "https://example.com/file.zip"
+dl -Url "https://example.com/installer.msi" -Destination "C:\Tools" -Force
+Get-Download -Url "https://example.com/image.png" -FileName "logo.png"
+```
+
+---
+
+### Network Diagnostics
+
+---
+
+#### `Invoke-NetworkDiag` · `netdiag`
+
+The single best first command for any connectivity complaint. Runs five checks in order — adapter, gateway, DNS, internet, custom target — and scores the result out of 5. **The first step that fails is your problem.**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Target` | string | `8.8.8.8` | An extra host to test, e.g. the server the user cannot reach. |
+| `-Traceroute` | switch | off | Also trace the route to `-Target`. |
+
+```powershell
+netdiag
+netdiag -Target "mycorp.com" -Traceroute
+Invoke-NetworkDiag -Target "192.168.1.1"
+```
+
+**Reading the score:** gateway fails → local cable, Wi-Fi, or switch. DNS fails but gateway is fine → DNS settings, try `cdns`. Internet fails but DNS resolves → upstream or firewall.
+
+---
+
+#### `Invoke-SubnetScan` · `subscan`
+
+A fast, no-frills ping sweep that lists which addresses are alive. Use `gnet` instead if you want to know *what* each device is.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Subnet` | string | `192.168.1.0/24` | Subnet in CIDR form. |
+| `-Timeout` | int | `500` | Milliseconds per host. |
+
+```powershell
+subscan
+Invoke-SubnetScan -Subnet "10.0.0.0/24"
+Invoke-SubnetScan -Subnet "192.168.10.0/24" -Timeout 200
+```
+
+Returns the list of live IPs, so you can pass it to other commands.
+
+---
+
+#### `Invoke-PortScan` · `pscan`
+
+Scans TCP ports on one host and reports each as open or closed/filtered.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-ComputerName` | string | *required* | Host or IP to scan. |
+| `-Ports` | int[] | 21, 22, 23, 53, 80, 443, 445, 3389 | Ports to test. |
+
+```powershell
+pscan -ComputerName "localhost"
+Invoke-PortScan -ComputerName "192.168.1.50" -Ports @(21, 22, 23, 80)
+Invoke-PortScan -ComputerName "my-firewall" -Ports 443
+```
+
+> If the hostname cannot be resolved, the command says so once and stops rather than reporting every port as closed.
+>
+> **Only scan networks you are responsible for.** Port scanning other people's networks may be illegal and will likely trigger their security alerts.
+
+---
+
+#### `Get-AdvancedDNS` · `advdns`
+
+Looks up **all** DNS record types for a domain against a DNS server you choose. Query a public server and your internal one, then compare — differences explain a lot of "it works for me but not for them" problems.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Domain` | string | *required* | Domain to look up. |
+| `-Server` | string | `8.8.8.8` | DNS server to ask. `1.1.1.1` is Cloudflare. |
+
+```powershell
+Get-AdvancedDNS -Domain "witech.org"
+advdns -Domain "google.com" -Server "1.1.1.1"
+```
+
+---
+
+#### `Get-ActiveConnections` · `netcon`
+
+Lists currently established TCP connections with the process ID behind each. A quick, static snapshot — use `traffic` for a live view.
+
+*No parameters.* Shows the first 15 connections.
+
+```powershell
+netcon
+```
+
+---
+
+#### `Get-NetworkInsight` · `netinsight`
+
+A deep look at local networking: each adapter, its IP, gateway, DNS servers, link speed, plus the ARP table of devices recently talked to.
+
+*No parameters.*
+
+```powershell
+netinsight
+```
+
+Also works on Linux and macOS, where it falls back to `ip`/`ifconfig` and `arp`.
+
+---
+
+#### `Test-EndpointReachability` · `pingreach`
+
+Pings a host a set number of times and reports the average response time. Use it to demonstrate packet loss or high latency.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Endpoint` | string | *required* | Host or IP. |
+| `-Count` | int | `4` | Number of pings. |
+
+```powershell
+Test-EndpointReachability -Endpoint "google.com"
+pingreach -Endpoint "192.168.1.1" -Count 10
+```
+
+---
+
+#### `Reset-NetworkAdapter` · `netreset` · **Admin required (enforced)**
+
+Disables and re-enables every active network adapter. A software-level "unplug the cable and plug it back in".
+
+*No parameters.*
+
+```powershell
+netreset
+```
+
+> **You will lose network connectivity for a few seconds.** Never run this over Remote Desktop or a remote session — you will disconnect yourself and may not get back in.
+
+---
+
+### System Health & Performance
+
+---
+
+#### `Get-WiTechSystemInfo` · `gci2`
+
+Hardware and OS summary: operating system, CPU cores, total memory, and drive space. The first thing to run when you need to know what you are dealing with.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-ComputerName` | string | `localhost` | Query another machine (needs WinRM). |
+
+```powershell
+gci2
+gci2 -ComputerName "finance-pc"
+```
+
+---
+
+#### `Get-DiskSpace` · `gds`
+
+Free, used, and total space for every drive, with a percentage bar. Below roughly 10% free, Windows slows noticeably — check this early on any "slow computer" ticket.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-ComputerName` | string | `$env:COMPUTERNAME` | Query another machine (needs WinRM). |
+
+```powershell
+gds
+gds -ComputerName "fileserver"
+```
+
+---
+
+#### `Get-DiskHealth` · `diskhealth` · *Admin recommended*
+
+Reads the S.M.A.R.T. health status the drive reports about itself. Anything other than *Healthy* means back the data up now.
+
+*No parameters.*
+
+```powershell
+diskhealth
+```
+
+> Without elevation some drives report incomplete data. A *Healthy* result is not a promise — drives do fail without warning.
+
+---
+
+#### `Get-InstalledSoftware` · `software`
+
+Lists installed programs, read from the registry. Supports filtering and CSV export.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Name` | string | all | Filter by name; wildcards allowed (`*chrome*`). |
+| `-Publisher` | string | all | Filter by publisher (`Adobe*`). |
+| `-IncludeUpdates` | switch | off | Include Windows updates and hotfix entries. |
+| `-ExportPath` | string | none | Write results to a CSV. |
+
+```powershell
+software
+software -Name "*chrome*"
+Get-InstalledSoftware -Publisher "Adobe*" -ExportPath "C:\Reports\adobe.csv"
+```
+
+> Reads the registry only. It deliberately avoids the `Win32_Product` method, which is slow and can trigger repair operations on every installed MSI.
+
+---
+
+#### `Get-PendingWindowsUpdate` · `winupd`
+
+Asks the Windows Update service what is waiting to install.
+
+*No parameters.*
+
+```powershell
+winupd
+```
+
+---
+
+#### `Get-ProcessMemoryConsumer` · `memproc`
+
+Top memory-consuming processes, largest first.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Top` | int | `10` | How many to list. |
+
+```powershell
+memproc
+memproc -Top 20
+```
+
+---
+
+#### `Get-ServiceHealth` · `gsvc` · *Admin needed for `-AutoFix`*
+
+Checks the Windows services that matter — Defender, Firewall, Event Log, DNS Client, Spooler, Workstation, Update, DHCP, Time, Search, Netlogon, BITS — and reports any that are not running.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Services` | string[] | 14 critical services | Check a specific list instead. |
+| `-AutoFix` | switch | off | Attempt to start anything stopped. **Needs admin.** |
+
+```powershell
+gsvc
+gsvc -AutoFix
+Get-ServiceHealth -Services @("WinDefend", "MpsSvc")
+```
+
+---
+
+#### `Get-PrinterStatus` · `printers` · *Admin needed for `-ClearStuck`*
+
+Lists printers, their status, and how many jobs are queued.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-ClearStuck` | switch | off | Delete stuck jobs. **Needs admin.** |
+
+```powershell
+printers
+printers -ClearStuck
+```
+
+> If `-ClearStuck` does not fix it, use `rps` to reset the whole spooler.
+
+---
+
+#### `Get-StaleProfiles`
+
+Finds local user profiles nobody has used recently — useful for reclaiming disk space on shared machines.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-DaysInactive` | int | `30` | Inactivity threshold in days. |
+
+```powershell
+Get-StaleProfiles
+Get-StaleProfiles -DaysInactive 90
+```
+
+> Reports only. It does not delete anything.
+
+---
+
+#### `Clear-BrowserCache` · `clearcache` · *Admin needed for other users*
+
+Clears cache, cookies, and history for Chrome, Edge, and/or Firefox.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Browser` | `All` `Chrome` `Edge` `Firefox` | `All` | Which browser to clear. |
+| `-Username` | string | current user | Clear another user's profile. **Needs admin.** |
+
+```powershell
+clearcache
+clearcache -Browser "Chrome"
+clearcache -Browser "Chrome" -Username "Administrator"
+```
+
+> **This signs the user out of websites** and clears saved history. Warn them first. Close the browser before running, or locked files will be skipped.
+
+---
+
+#### `Clear-TempFiles` · `ctmp`
+
+Deletes temporary files from the user's temp folders.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-IncludeWindowsTemp` | switch | off | Also clear the Windows system temp folder. |
+
+```powershell
+ctmp
+ctmp -IncludeWindowsTemp
+ctmp -WhatIf                 # preview which folders would be cleared, delete nothing
+```
+
+> Files in use are skipped — that is normal and not an error. Supports `-WhatIf`/`-Confirm`.
+
+---
+
+#### `Invoke-DeepDiskCleanup` · `deepclean` · **Admin required (enforced)**
+
+A far more aggressive cleanup than `ctmp`: system temp, every user's temp folder, prefetch, and Windows distribution caches.
+
+*No parameters.*
+
+```powershell
+deepclean
+deepclean -WhatIf           # preview every path that would be wiped, delete nothing
+```
+
+> Clearing prefetch will make the next few application launches slightly slower while Windows rebuilds it. Use `ctmp` first; keep this for when you genuinely need the space. Supports `-WhatIf`/`-Confirm`.
+
+---
+
+#### `Invoke-SystemRepair` · `repair` · **Admin required (enforced)**
+
+Runs the two standard Windows repair tools in the correct order: SFC to check system files, then DISM to repair the component store.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-SkipSFC` | switch | off | Skip the SFC scan. |
+| `-SkipDISM` | switch | off | Skip the DISM repair. |
+
+```powershell
+repair
+repair -SkipSFC
+Invoke-SystemRepair -SkipDISM
+```
+
+> Takes 15–45 minutes. Do not interrupt it. DISM needs internet access to fetch replacement files.
+
+---
+
+#### `Optimize-CPU` · `ocpu` · **Admin required (enforced)**
+
+Switches Windows to the High Performance power plan and disables CPU throttling and core parking.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Action` | `Optimize` `Revert` | `Optimize` | `Revert` restores Balanced and re-enables throttling. |
+| `-VerboseOutput` | switch | off | Show detailed progress. |
+| `-Force` | switch | off | Proceed even if the elevation check fails. |
+
+```powershell
+ocpu
+ocpu -Action Revert
+```
+
+> **On laptops this significantly reduces battery life and increases heat.** Use `-Action Revert` when finished.
+
+---
+
+#### `Optimize-HDD` · **Admin required (enforced)**
+
+A full maintenance pass: defragment C:, DISM component check, SFC scan, then schedule chkdsk for the next boot.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-VerboseOutput` | switch | off | Show detailed progress. |
+| `-NoRestart` | switch | off | Schedule chkdsk but do not reboot. |
+
+```powershell
+Optimize-HDD -NoRestart
+```
+
+> **Reboots the machine unless you pass `-NoRestart`.** Always use `-NoRestart` on someone else's machine. The scheduled chkdsk runs before Windows loads and can take hours on a large or failing disk.
+
+---
+
+#### `Reset-PrintSpooler` · `rps` · **Admin required (enforced)**
+
+Stops the Print Spooler, deletes everything stuck in the queue, and starts it again. Fixes most "the printer won't print and won't clear" problems.
+
+*No parameters.*
+
+```powershell
+rps
+```
+
+> **All queued print jobs are lost, for every user on the machine.** Anything half-printed must be sent again.
+
+---
+
+#### `Invoke-GPUpdate` · `gpo` · *Admin needed for computer policy*
+
+Forces a Group Policy refresh and then reports the applied policy summary.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-ComputerName` | string | this machine | Refresh a remote machine (needs WinRM). |
+| `-Target` | `Both` `Computer` `User` | `Both` | Which policy scope to refresh. |
+
+```powershell
+gpo
+gpo -Target Computer
+Invoke-GPUpdate -ComputerName "FRONTDESK-02"
+```
+
+> Some policies only apply at logon or startup, so a refresh alone may not be enough.
+
+---
+
+#### `Repair-IdentityTrust` · *Admin needed*
+
+Checks the secure channel between the machine and the domain — the trust relationship that, when broken, produces *"The trust relationship between this workstation and the primary domain failed."* Also reports Entra ID join state.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Force` | switch | off | Attempt the repair. Prompts for domain credentials. |
+
+```powershell
+Repair-IdentityTrust             # check only, changes nothing
+Repair-IdentityTrust -Force      # attempt repair
+```
+
+> Without `-Force` it only reports. Repairing requires domain credentials with permission to reset the computer account.
+
+---
+
+### Security & Threat Hunting
+
+---
+
+#### `Get-MalwareInfo` · `gmi`
+
+Takes SHA256 file hashes from a CSV, checks each against VirusTotal, and writes a report of anything flagged malicious.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-TempPath` | string | `%TEMP%` | Where the report is written. |
+| `-AlertPath` | string | `C:\witech\AlertDetail.csv` | CSV containing the hashes to check. |
+| `-ApiKey` | string | `$env:VIRUSTOTAL_API_KEY` | Your VirusTotal API key. |
+
+```powershell
+Get-MalwareInfo -ApiKey "MySecretVTKey"
+gmi -AlertPath "C:\WiTech\ThreatAlerts.csv"
+```
+
+> Needs internet and a VirusTotal API key. Free keys are rate-limited to roughly 4 lookups per minute, so large lists take a while. Only hashes are sent — never file contents.
+
+---
+
+#### `Get-FailedLogins` · `gfl` · **Admin required (enforced)**
+
+Reads failed logon events (ID 4625) from the Security log, then groups them by targeted username and source. A burst against one account is a password-guessing attempt; a burst across many accounts is a spray attack.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-MaxEvents` | int | `500` | How many events to read back through. |
+| `-TopN` | int | `15` | How many targeted accounts to list. |
+| `-AlertThreshold` | int | `5` | Failures against one account before it is highlighted. |
+
+```powershell
+gfl
+gfl -MaxEvents 1000 -AlertThreshold 10
+Get-FailedLogins -TopN 5
+```
+
+> Most failures are mundane — a stale saved password on a phone or a mapped drive. Look for volume and pattern, not single events.
+
+---
+
+#### `Get-USBHistory` · `usblog` · **Admin required (enforced)**
+
+Lists every USB device ever connected to the machine, from the registry, with last-connected timestamps.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Days` | int | `0` (all) | Only devices seen in the last N days. |
+| `-StorageOnly` | switch | off | Only mass-storage devices — the ones that can carry data off-site. |
+
+```powershell
+usblog
+usblog -Days 14 -StorageOnly
+```
+
+---
+
+#### `Get-LocalAdminAudit` · `ladmin`
+
+Lists the local Administrators group and flags entries worth reviewing: enabled local accounts other than the built-in Administrator, domain users granted admin directly rather than through a group, and orphaned SIDs from deleted accounts.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-ExpectedMembers` | string[] | none | Your approved list. Anything not on it is flagged. |
+
+```powershell
+ladmin
+ladmin -ExpectedMembers "Administrator", "CONTOSO\Domain Admins", "CONTOSO\IT-Helpdesk"
+ladmin | Where-Object Flag | Export-Csv C:\Reports\admin-flags.csv -NoTypeInformation
+```
+
+> Finds the group by its well-known SID, so it works regardless of the system's display language.
+
+---
+
+#### `Invoke-ProcessGuard` · `pwatch` · *Admin needed for `-AutoKill`*
+
+Live watchdog for processes exceeding CPU or memory thresholds.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-CpuThreshold` | int | `80` | CPU percentage that triggers an alert. |
+| `-RamThresholdMB` | int | `1500` | Working-set megabytes that trigger an alert. |
+| `-Top` | int | `20` | Rows to display. |
+| `-SampleSecs` | int | `3` | Seconds between samples. |
+| `-AutoKill` | switch | off | **Terminate** offending processes automatically. |
+
+```powershell
+pwatch
+Invoke-ProcessGuard -CpuThreshold 90 -RamThresholdMB 2000
+Invoke-ProcessGuard -SampleSecs 1 -Top 10
+```
+
+> **`-AutoKill` terminates processes without asking, and unsaved work is lost.** Watch first without it and confirm the process is genuinely misbehaving. Runs until `Ctrl+C`.
+
+---
+
+#### `Invoke-RansomwareHeuristics` · *Admin needed for shadow-copy check*
+
+Looks for signs of active ransomware: deleted Volume Shadow Copies, known ransomware file extensions and ransom notes, files with abnormally high entropy (a sign of mass encryption), and directories with sudden bursts of modifications.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Path` | string[] | user directories | Specific paths to sweep, e.g. a file share. |
+| `-SampleSize` | int | `400` | How many files to sample for entropy. |
+| `-RecentMinutes` | int | `15` | Window for detecting modification bursts. |
+
+```powershell
+Invoke-RansomwareHeuristics
+Invoke-RansomwareHeuristics -Path "D:\Shares\Finance" -SampleSize 1000
+Invoke-RansomwareHeuristics -RecentMinutes 60 -Verbose
+```
+
+> **This is a heuristic, not a scanner.** The output states its scope: a clean result means "nothing found in the files I sampled", not "this machine is clean". If you suspect an active infection, disconnect the machine from the network first.
+
+---
+
+#### `Get-LateralMovementHeuristics` · *Admin needed*
+
+Scans the Security log for patterns that suggest an attacker moving between machines — unusual logon types, privilege escalation, and remote logon sequences.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-MaxEvents` | int | `1000` | How many Security events to analyse. |
+
+```powershell
+Get-LateralMovementHeuristics
+Get-LateralMovementHeuristics -MaxEvents 5000
+```
+
+> Produces leads for investigation, not verdicts. Administrative work legitimately generates many of the same patterns.
+
+---
+
+#### `Get-DefenderStatus` · `defender`
+
+Microsoft Defender health at a glance: real-time protection, signature age, last scan, tamper protection, and threats detected recently. Says so clearly if Defender is not the active antivirus. Returns a summary object.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-ThreatHistoryDays` | int | `7` | How many days back to count recent detections. |
+
+```powershell
+defender
+Get-DefenderStatus -ThreatHistoryDays 30
+Get-DefenderStatus | Select-Object RealTimeProtection, SignatureAgeDays
+```
+
+> Read-only. If a third-party antivirus has taken over, the Defender cmdlets may be unavailable — the command tells you rather than failing.
+
+---
+
+#### `Get-PersistenceAudit` · `persist` · *Admin needed for full visibility*
+
+Sweeps the places malware installs itself to survive a reboot — Run/RunOnce keys, Startup folders, auto-start services, and non-Microsoft scheduled tasks — and flags any entry whose executable is unsigned, tampered, or missing on disk. Returns every entry as an object.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Top` | int | `40` | Maximum flagged entries to print. All entries are still returned as objects. |
+
+```powershell
+persist
+persist -Top 100
+Get-PersistenceAudit | Where-Object Flag | Export-Csv C:\Reports\autoruns.csv -NoTypeInformation
+```
+
+> A heuristic sweep, not a verdict. A signed third-party autostart is flagged for awareness, not because it is malicious.
+
+---
+
+#### `Get-FirewallAudit` · `fwaudit`
+
+Reports whether each firewall profile (Domain/Private/Public) is enabled and its default actions, then flags enabled inbound Allow rules that expose sensitive services — RDP, SMB, WinRM, SSH, SQL, VNC — to any remote address. Returns the risky rules as objects.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-IncludeAllowRules` | switch | off | Also list every enabled inbound Allow rule, not just risky ones. |
+
+```powershell
+fwaudit
+Get-FirewallAudit -IncludeAllowRules
+Get-FirewallAudit | Export-Csv C:\Reports\firewall-risky.csv -NoTypeInformation
+```
+
+> Read-only. The scan reads every enabled inbound Allow rule, so it can take a few seconds on a machine with many rules.
+
+---
+
+### Reporting & Documentation
+
+---
+
+#### `Get-TicketContext` · `ticket`
+
+The one command to run at the start of any support call. Collects last boot time, disk space, CPU, recent errors, and patch status — everything you would otherwise ask the user for.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-ComputerName` | string | `$env:COMPUTERNAME` | Query another machine (needs WinRM). |
+
+```powershell
+ticket
+ticket -ComputerName "accounting-pc"
+```
+
+---
+
+#### `Get-Events` · `ge`
+
+Shows recent WiTechTools activity from the Windows Application event log — a record of which toolkit commands ran and what they reported.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-MaxEvents` | int | `30` | How many entries to show. |
+
+```powershell
+ge
+ge -MaxEvents 50
+```
+
+---
+
+#### `Get-AssetInventory` · `asset`
+
+Full inventory of a machine — OS, CPU, RAM, BIOS, motherboard, disks, network adapters, and installed software — displayed as a summary and exported to CSV for asset tracking.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-ComputerName` | string | `$env:COMPUTERNAME` | Inventory a remote machine (needs WinRM). |
+| `-ExportPath` | string | Documents | Where to write the CSV. |
+| `-SoftwareTop` | int | `30` | How many installed programs to include. |
+
+```powershell
+asset
+asset -ComputerName "FRONTDESK-02" -SoftwareTop 50
+Get-AssetInventory -ExportPath "\\fileserver\IT\Inventory\office-pc.csv"
+```
+
+---
+
+#### `New-IncidentReport` · `incident`
+
+Builds a timestamped HTML report with system context and recent toolkit activity — suitable for attaching to a ticket or sending to management.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Title` | string | `IT Incident` | Report title. |
+| `-ReportedBy` | string | `$env:USERNAME` | Your name. |
+| `-OutputPath` | string | Desktop | Where to save the HTML file. |
+| `-EventCount` | int | `25` | How many recent toolkit events to embed. |
+
+```powershell
+New-IncidentReport -Title "System Lockup"
+incident -Title "CPU Spike" -ReportedBy "TechSupport" -OutputPath "C:\Reports"
+```
+
+---
+
+#### `Export-SystemSnapshot` · `snap`
+
+Saves the machine's current state — processes, services, network configuration — to a JSON file, or compares the machine against a snapshot taken earlier.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Path` | string | default location | Where to save the snapshot. |
+| `-Compare` | string | none | Path to an earlier snapshot to compare against. |
+| `-Open` | switch | off | Open the file when done. |
+
+```powershell
+snap
+snap -Compare "C:\Snapshots\baseline.json"
+Export-SystemSnapshot -Path "C:\WiTechLogs\snapshot.json" -Open
+```
+
+> Take a snapshot on every machine you set up. Comparing later turns "it used to work" into a specific list of what changed.
+
+---
+
+#### `Invoke-SystemStateDiff`
+
+Same idea as `snap`, focused on processes, services, and listening ports, with a simpler two-step workflow.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-BaselinePath` | string | `%TEMP%\system_baseline.json` | Where the baseline lives. |
+| `-Compare` | switch | off | Compare against the baseline instead of creating one. |
+
+```powershell
+Invoke-SystemStateDiff                       # capture a baseline
+Invoke-SystemStateDiff -Compare              # what changed since?
+Invoke-SystemStateDiff -BaselinePath "C:\WiTechLogs\baseline.json"
+```
+
+> The default baseline lives in TEMP and can be cleaned up by Windows or by `ctmp`. Use `-BaselinePath` for anything you need to keep.
+
+---
+
+#### `Export-EventLogs` · `elogs` · **Admin required (enforced)**
+
+Exports the Application, System, and Security event logs to a dated ZIP — for escalation, or before rebuilding a machine.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-OutputPath` | string | Desktop | Where to write the ZIP. |
+| `-Logs` | string[] | Application, System, Security | Which logs to include. |
+| `-Days` | int | `7` | How far back to export. |
+
+```powershell
+elogs
+elogs -Logs @("Application", "System") -Days 14 -OutputPath "C:\Temp"
+Export-EventLogs -Days 1
+```
+
+> Event logs can contain usernames and machine names. Handle the ZIP accordingly.
+
+---
+
+#### `Invoke-PatchReport` · `patch`
+
+Lists recently installed Windows updates and warns if the machine has not been patched in too long.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Last` | int | `20` | How many updates to list. |
+| `-StaleDays` | int | `30` | Days without a patch before flagging as stale. |
+
+```powershell
+patch
+patch -Last 10 -StaleDays 14
+```
+
+---
+
+### Active Directory
+
+Both commands need the **RSAT Active Directory** tools installed and a domain-joined machine.
+
+---
+
+#### `Get-ADUserInfo` · `aduser`
+
+Shows an AD account's status: enabled or disabled, locked out, last logon, password expiry, and group memberships. The first stop for any account problem.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Username` | string | *required* | Username or UPN. Accepts pipeline input. |
+
+```powershell
+aduser jdoe
+Get-ADUserInfo -Username "jdoe@domain.com"
+"jdoe" | Get-ADUserInfo
+```
+
+---
+
+#### `Unlock-ADUser` · `unlock`
+
+Unlocks a locked-out account and resets its bad-password count.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Username` | string | *required* | Username to unlock. Accepts pipeline input. |
+
+```powershell
+unlock jdoe
+"jdoe" | Unlock-ADUser
+```
+
+> Unlocking treats the symptom. If it locks again within minutes, something is retrying an old password — check phones, mapped drives, and scheduled tasks, and use `gfl` to find the source.
+
+---
+
+### Files, Media & Module Admin
+
+---
+
+#### `Get-Keys` · `gk` · `getkeys`
+
+Reads product keys from one or more CSV files and appends them to a master key registry.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-path` | string[] | `C:\witech\keys.csv` | Source CSV, or several. |
+| `-dest` | string | `C:\witech\keys-complete.csv` | Master registry to append to. |
+
+```powershell
+gk
+gk -path "C:\Temp\keys.csv" -dest "D:\Backup\allkeys.csv"
+gk -path @("C:\keys1.csv", "C:\keys2.csv")
+```
+
+> Appends rather than overwrites, so the master file accumulates. This is intentional.
+
+---
+
+#### `Set-Directory` · `sd` · `setdir`
+
+Creates a working folder and moves into it. If the first name is taken, it uses the fallback.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Name` | string | `./temp/` | Preferred folder. |
+| `-Name2` | string | `./temp-2/` | Fallback if the first exists. |
+
+```powershell
+sd
+sd -Name "C:\WorkTemp"
+Set-Directory -Name "./sandbox" -Name2 "./sandbox-fallback"
+```
+
+---
+
+#### `Set-MapDrive`
+
+Maps a network share to a drive letter.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-DriveLetter` | string | `Z:` | Letter to map to. |
+| `-NetworkPath` | string | `\\server\share` | UNC path of the share. |
+
+```powershell
+Set-MapDrive -DriveLetter "S:" -NetworkPath "\\dc1\sales"
+Set-MapDrive -NetworkPath "\\backup-nas\archives"
+```
+
+---
+
+#### `Set-ScanDocs` · *Admin needed*
+
+Sets up a scan-to-folder share for a copier or scanner. Creates the folders, provisions a **standard, non-administrative** local account for the device to authenticate as, and shares the folder with Change access and NTFS Modify rights only.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Username` | string | `scans` | Local account for the scanner. |
+| `-ShareName` | string | `ScannedDocuments` | Name of the SMB share. |
+
+```powershell
+Set-ScanDocs
+Set-ScanDocs -Username "copier" -Verbose
+```
+
+> Deliberately grants the least privilege that works — a scanner account should never be an administrator. The elevated helper script is staged in an access-restricted folder rather than the world-readable TEMP directory.
+
+---
+
+#### `Set-ImageToPng` · `cpng`
+
+Converts images and video frames to PNG using FFmpeg.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-SourceDirectory` | string | `.` (current folder) | Folder to read from. |
+| `-OutputDirectory` | string | `./png` | Folder to write to. |
+
+```powershell
+cpng
+Set-ImageToPng -SourceDirectory "C:\Pictures"
+cpng -OutputDirectory "C:\Pngs"
+```
+
+> Requires FFmpeg on your `PATH`.
+
+---
+
+#### `Set-ImageToJpg` · `cjpg`
+
+Converts images and video frames to JPG using FFmpeg.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-SourceDirectory` | string | `.` (current folder) | Folder to read from. |
+| `-OutputDirectory` | string | `./jpg` | Folder to write to. |
+| `-Quality` | int | `85` | 1–100. Higher is better quality and a larger file. |
+
+```powershell
+cjpg
+Set-ImageToJpg -SourceDirectory "C:\Pictures" -Quality 90
+Set-ImageToJpg -Quality 50
+```
+
+> Requires FFmpeg on your `PATH`.
+
+---
+
+#### `Sync-Module` · `sync`
+
+Mirrors this module to the team network share so every technician gets the same version.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-Destination` | string | `$env:WITECH_SYNC_PATH`, else `T:\Dev\Powershell\Modules\WiTechTools` | Target share. |
+
+```powershell
+sync
+sync -Destination "\\fileserver\IT\Modules\WiTechTools"
+```
+
+> Copies only — it never deletes files on the share. Backups, test files, and `.git` internals are excluded. If the share is unreachable it gives up after about 4 seconds rather than hanging.
+
+---
+
+#### `Import-WitechModule`
+
+Reloads the module from disk. Use it after editing the module, or if commands are behaving oddly.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-ModulePath` | string | the loaded module's own folder | Load from somewhere else. |
+| `-Sign` | switch | off | Also code-sign the module after loading. |
+
+```powershell
+Import-WitechModule
+Import-WitechModule -ModulePath "D:\Dev\WiTechTools"
+Import-WitechModule -Sign
+```
+
+> `Import-Module WiTechTools -Force` does the same job in one line and is usually quicker to type.
+
+---
+
+#### `Update-WiTechModuleSignature` · *Admin needed*
+
+Creates a self-signed code-signing certificate (CN=TechSupport), trusts it on this machine, and signs a file with it.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `-FilePath` | string | see [Known Issues](#known-issues) | File to sign. **Supply this explicitly.** |
+| `-CertPath` | string | `%USERPROFILE%\Documents\MyCodeSigningCert.cer` | Where to export the certificate. |
+
+```powershell
+Update-WiTechModuleSignature -FilePath "C:\scripts\myscript.ps1"
+```
+
+> **The default `-FilePath` is wrong on most machines** — always pass `-FilePath` explicitly. See [Known Issues](#known-issues). Trusting the certificate writes to the machine-wide trust store and needs admin. A self-signed certificate is only trusted on machines where it has been installed.
+
+---
+
+#### `Get-WiTechCommands` · `cmds`
+
+Prints every WiTechTools command with its shortcut. When you cannot remember a command name, start here.
+
+*No parameters.*
+
+```powershell
+cmds
+```
+
+---
+
+## Logging
+
+WiTechTools records activity in the **Windows Application event log** under the source `WiTech`. Each command writes its own event ID, so you can trace which toolkit commands ran on a machine and what they reported.
+
+```powershell
+ge                # recent toolkit activity
+ge -MaxEvents 100 # look further back
+```
+
+The `WiTech` source is registered automatically the first time the module is imported from an elevated terminal. Until that happens, logging is silently skipped — commands still work normally.
+
+---
+
+## Troubleshooting
+
+**"The term 'gnet' is not recognized"**
+The module is not loaded in this terminal. Run `Import-Module WiTechTools`, and add it to your `$PROFILE` so it loads every time.
+
+**"The module requires a minimum PowerShell version of 7.0"**
+You are in Windows PowerShell 5.1. Close it and open **PowerShell 7** (`pwsh`).
+
+**A command prints "Must be run as Administrator"**
+That command enforces elevation. Close your terminal, right-click PowerShell 7, and choose *Run as administrator*.
+
+**A command fails with confusing permission errors**
+It probably needs admin but does not check for it — anything marked **Yes\*** in the tables above. Try again elevated.
+
+**Output looks like `←[36m` instead of colours**
+Your terminal does not support ANSI colour. Use Windows Terminal or the PowerShell 7 console rather than the legacy console host.
+
+**`Get-Network` is slow on its first run**
+It looks up hardware vendors online the first time it sees each manufacturer, then caches them. Later scans on the same network are much faster.
+
+**Remote `-ComputerName` commands fail**
+The target needs WinRM enabled and reachable, and you need rights on it. Test with `Test-WSMan -ComputerName <name>`.
+
+**AD commands fail with "not recognized"**
+The RSAT Active Directory tools are not installed on this machine.
+
+---
+
+## Known Issues
+
+None currently open.
+
+Two long-standing issues were resolved in 4.3.0:
+
+- `Update-WiTechModuleSignature` had default paths that did not exist on a standard install. Both now resolve correctly, including when Documents is redirected to OneDrive.
+- `Get-ComputerInfo` used to be a WiTechTools wrapper that replaced the built-in Windows cmdlet and did not support its parameters. It has been removed, so `Get-ComputerInfo` is once again Microsoft's cmdlet, with full support for `-Property` and the rest. Use `gci2` (`Get-WiTechSystemInfo`) for the WiTech hardware summary.
+
+---
+
+## Running the Tests
+
+```powershell
+Install-Module Pester -Scope CurrentUser -Force    # Pester 5.x
+Invoke-Pester -Path .\tests -Output Detailed
+```
+
+The suite validates the manifest, imports the module in a clean session, checks that every declared command and shortcut actually exists (and that nothing exists undeclared), verifies help completeness, runs PSScriptAnalyzer, and unit-tests the logic behind state diffing, entropy scanning, key export, and snapshot comparison.
+
+Run it before `sync`.
+
+**GitHub Actions** runs the same suite on every push and pull request against `main`, plus a weekly scheduled run so a platform update can't quietly break the module between pushes. See `.github/workflows/test.yml`.
+
+**A pre-push hook enforces this locally**, since GitHub's required-status-check enforcement (branch protection / rulesets) is gated behind a paid plan for a private repository. On a fresh clone, enable it once:
+
+```powershell
+git config core.hooksPath .githooks
+```
+
+After that, `git push` to `main` runs the suite first and refuses the push if anything fails. Deliberately bypass it with `git push --no-verify` if you genuinely need to push a known-broken branch.
+
+---
+
+## Project Layout
+
+```
+WiTechTools/
+├── WiTechTools.psd1               # Manifest: version, exported commands, shortcuts
+├── WiTechTools.psm1               # Loader — imports everything in Public\
+├── PSScriptAnalyzerSettings.psd1  # Linting rules for this project
+├── README.md                      # This guide
+├── Public/                        # One file per area
+│   ├── AD.ps1                     # Active Directory
+│   ├── FileTools.ps1              # Files, media, module administration
+│   ├── Helpers.ps1                # Shared internals: tables, logging, device typing
+│   ├── Network.ps1                # Everyday networking
+│   ├── NetworkDiagnostics.ps1     # Deeper network troubleshooting
+│   ├── Reporting.ps1              # Reports, snapshots, inventory
+│   ├── Security.ps1               # Threat hunting and auditing
+│   └── System.ps1                 # Health, performance, repair
+└── tests/                         # Pester 5 test suite
+```
+
+`Helpers.ps1` also holds internal functions that are deliberately **not** exported — table formatting, event logging, the device classifier used by `Get-Network`, and the shared cursor handling behind every self-refreshing display (`traffic`, `pwatch`, `wifiscan -Live`), which is what keeps each refresh redrawing in place instead of scrolling the previous frame up. They are available inside the module but do not appear in `cmds`.
+
+---
+
+*Built and maintained by the WiTech team.*
